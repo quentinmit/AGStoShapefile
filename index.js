@@ -10,6 +10,7 @@
 // Node Modules
 const fs = require('fs');
 const rp = require('request-promise');
+const Promise = require('bluebird');
 const request = require('request');
 const path = require('path');
 const _ = require('lodash');
@@ -63,20 +64,31 @@ fs.readFile(serviceFile, function (err, data) {
 			throttle = +service[2];
 		}
 
-		rp({
-			url : url,
-			method : 'GET',
-			json : true
-		}).then((body) => {
-			requestService(service[0].trim(), service[1].trim(), body.objectIds, throttle);
-		}).catch((err) => {
-		  console.log(err);
-		});
+		const serviceUrl = service[0].trim();
+
+		Promise.join(
+			rp({
+				url : url,
+				method : 'GET',
+				json : true
+			}),
+			rp({
+				url: baseUrl+'?f=json',
+				method: 'GET',
+				json: true,
+			}),
+			(body, meta) => {
+				const supportsGeoJSON = meta.supportedQueryFormats.split(", ").indexOf("geoJSON") >= 0;
+				requestService(serviceUrl, service[1].trim(), body.objectIds, supportsGeoJSON, throttle);
+			})
+			.catch((err) => {
+				console.log(err);
+			});
 	})
 });
 
 // Resquest JSON from AGS
-function requestService(serviceUrl, serviceName, objectIds, throttle) {
+function requestService(serviceUrl, serviceName, objectIds, supportsGeoJSON, throttle) {
 	objectIds.sort();
 	const requests = Math.ceil(objectIds.length / 100);
 	var completedRequests = 0;
@@ -107,9 +119,13 @@ function requestService(serviceUrl, serviceName, objectIds, throttle) {
 		const userQS = getUrlVars(serviceUrl);
 		// mix one obj with another
 		var qs = mixin(userQS, reqQS);
+
+		if (supportsGeoJSON) {
+			qs.f = 'geoJSON';
+		}
+
 		qs = queryString.stringify(qs);
 		const url = decodeURIComponent(getBaseUrl(serviceUrl) + '/query/?' + qs);
-
 
 		const partialsDir = `${outDir}/${serviceName}/partials`;
 
@@ -142,10 +158,12 @@ function requestService(serviceUrl, serviceName, objectIds, throttle) {
 
 		// timeout for throttle
 		setTimeout(() => {
-			request(options)
-				.pipe(featureStream)
-				.pipe(geojsonStream.stringify())
-				.pipe(outFile)
+			var r = request(options);
+			if (!supportsGeoJSON) {
+				r = r.pipe(featureStream)
+					.pipe(geojsonStream.stringify());
+			}
+			r.pipe(outFile)
 				.on('finish', () => {
 					completedRequests += 1;
 					console.log(`Completed ${completedRequests} of ${requests} requests for ${serviceName}`);
