@@ -11,6 +11,7 @@
 const fs = require('fs');
 const rp = require('request-promise');
 const request = require('request');
+const path = require('path');
 const _ = require('lodash');
 const TerraformerArcGIS = require('terraformer-arcgis-parser');
 const geojsonStream = require('geojson-stream');
@@ -81,6 +82,8 @@ function requestService(serviceUrl, serviceName, objectIds, throttle) {
 	var completedRequests = 0;
 	console.log(`Number of features for service ${serviceName}:`, objectIds.length);
 	console.log(`Getting chunks of 100 features, will make ${requests} total requests`);
+
+	const serviceNameShort = path.basename(serviceName);
 
 	for(let i = 0; i < Math.ceil(objectIds.length / 100); i++) {
 		var ids = [];
@@ -171,7 +174,7 @@ function requestService(serviceUrl, serviceName, objectIds, throttle) {
 		function mergeFiles() {
 			console.log(`Finished extracting chunks for ${serviceName}, merging files...`)
 			fs.readdir(partialsDir, (err, files) => {
-				const finalFilePath = `${outDir}/${serviceName}/${serviceName}_${Date.now()}.geojson`
+				const finalFilePath = `${outDir}/${serviceName}/${serviceNameShort}_${Date.now()}.geojson`
 				const finalFile = fs.createWriteStream(finalFilePath);
 
 				let streams = CombinedStream.create();
@@ -208,7 +211,7 @@ function requestService(serviceUrl, serviceName, objectIds, throttle) {
 		function makeShape(geojsonPath) {
 			console.log(`Generating shapefile for ${serviceName}`)
 			// todo: make optional with flag
-			const shpPath = `${outDir}/${serviceName}/${serviceName}_${Date.now()}.zip`;
+			const shpPath = `${outDir}/${serviceName}/${serviceNameShort}_${Date.now()}.zip`;
 			const shpFile = fs.createWriteStream(shpPath);
 			var shapefile = ogr2ogr(geojsonPath)
 				.format('ESRI Shapefile')
