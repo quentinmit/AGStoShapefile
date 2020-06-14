@@ -11,8 +11,8 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
-    "type" : "git",
-    "url" : "https://github.com/tannerjt/AGStoShapefile"
+    "type": "git",
+    "url": "https://github.com/tannerjt/AGStoShapefile"
   },
   "bin": {
     "agsout": "./index.js"
@@ -40,6 +40,8 @@
     "request": "^2.88.0",
     "request-promise": "^4.2.2",
     "rimraf": "^2.6.2",
-    "terraformer-arcgis-parser": "^1.1.0"
+    "stream-to-promise": "^3.0.0",
+    "terraformer-arcgis-parser": "^1.1.0",
+    "xml-js": "^1.6.11"
   }
 }
