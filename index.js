@@ -18,6 +18,7 @@ const TerraformerArcGIS = require('terraformer-arcgis-parser');
 const geojsonStream = require('geojson-stream');
 const JSONStream = require('JSONStream');
 const CombinedStream = require('combined-stream');
+const streamToPromise = require('stream-to-promise');
 const queryString = require('query-string');
 const merge2 = require('merge2');
 const rimraf = require('rimraf');
@@ -47,48 +48,49 @@ fs.readFile(serviceFile, function (err, data) {
 	data.toString().split('\n').forEach(function (service) {
 		var service = service.split('|');
 		if(service[0].split('').length == 0) return;
-		var baseUrl = getBaseUrl(service[0].trim());
-		var reqQS = {
-			where: '1=1',
-			returnIdsOnly: true,
-			f: 'json'
-		};
-		var userQS = getUrlVars(service[0].trim());
-		// mix one obj with another
-		var qs = mixin(userQS, reqQS);
-		qs = queryString.stringify(qs);
-		var url = decodeURIComponent(getBaseUrl(baseUrl) + '/query/?' + qs);
-
+		const serviceUrl = service[0].trim();
+		const serviceName = service[1].trim();
 		var throttle = 0;
 		if(service.length > 2) {
 			throttle = +service[2];
 		}
 
-		const serviceUrl = service[0].trim();
-
-		Promise.join(
-			rp({
-				url : url,
-				method : 'GET',
-				json : true
-			}),
-			rp({
-				url: baseUrl+'?f=json',
-				method: 'GET',
-				json: true,
-			}),
-			(body, meta) => {
-				const supportsGeoJSON = meta.supportedQueryFormats.split(", ").indexOf("geoJSON") >= 0;
-				requestService(serviceUrl, service[1].trim(), body.objectIds, supportsGeoJSON, throttle);
-			})
-			.catch((err) => {
-				console.log(err);
-			});
+		fetchOneService(serviceUrl, serviceName, throttle);
 	})
 });
 
+function fetchOneService(serviceUrl, serviceName, throttle) {
+	var baseUrl = getBaseUrl(serviceUrl);
+	var reqQS = {
+		where: '1=1',
+		returnIdsOnly: true,
+		f: 'json'
+	};
+	var userQS = getUrlVars(serviceUrl);
+	// mix one obj with another
+	var qs = mixin(userQS, reqQS);
+	qs = queryString.stringify(qs);
+	var url = decodeURIComponent(getBaseUrl(baseUrl) + '/query/?' + qs);
+
+	Promise.join(
+		rp({
+			url : url,
+			method : 'GET',
+			json : true
+		}),
+		rp({
+			url: baseUrl+'?f=json',
+			method: 'GET',
+			json: true,
+		}),
+		(body, meta) => requestService(serviceUrl, serviceName, body.objectIds, meta, throttle))
+		.catch((err) => {
+			console.log(err);
+		});
+}
+
 // Resquest JSON from AGS
-function requestService(serviceUrl, serviceName, objectIds, supportsGeoJSON, throttle) {
+function requestService(serviceUrl, serviceName, objectIds, meta, throttle) {
 	objectIds.sort();
 	const requests = Math.ceil(objectIds.length / 100);
 	var completedRequests = 0;
@@ -96,6 +98,27 @@ function requestService(serviceUrl, serviceName, objectIds, supportsGeoJSON, thr
 	console.log(`Getting chunks of 100 features, will make ${requests} total requests`);
 
 	const serviceNameShort = path.basename(serviceName);
+
+	const supportsGeoJSON = meta.supportedQueryFormats.split(", ").indexOf("geoJSON") >= 0;
+
+	const partialsDir = `${outDir}/${serviceName}/partials`;
+
+	if(!fs.existsSync(`${outDir}`)) {
+		fs.mkdirSync(`${outDir}`)
+	}
+
+	if(!fs.existsSync(`${outDir}/${serviceName}`)) {
+		fs.mkdirSync(`${outDir}/${serviceName}`);
+	}
+
+	if (!fs.existsSync(partialsDir)){
+		fs.mkdirSync(partialsDir);
+	} else {
+		rimraf.sync(partialsDir);
+		fs.mkdirSync(partialsDir);
+	}
+
+	var parts = [];
 
 	for(let i = 0; i < Math.ceil(objectIds.length / 100); i++) {
 		var ids = [];
@@ -127,118 +150,112 @@ function requestService(serviceUrl, serviceName, objectIds, supportsGeoJSON, thr
 		qs = queryString.stringify(qs);
 		const url = decodeURIComponent(getBaseUrl(serviceUrl) + '/query/?' + qs);
 
-		const partialsDir = `${outDir}/${serviceName}/partials`;
-
-		if(i == 0) {
-			// first pass, setup folders
-			if(!fs.existsSync(`${outDir}`)) {
-				fs.mkdirSync(`${outDir}`)
-			}
-
-			if(!fs.existsSync(`${outDir}/${serviceName}`)) {
-				fs.mkdirSync(`${outDir}/${serviceName}`);
-			}
-
-			if (!fs.existsSync(partialsDir)){
-			    fs.mkdirSync(partialsDir);
-			} else {
-				rimraf.sync(partialsDir);
-				fs.mkdirSync(partialsDir);
-			}
-		}
-
-		const featureStream = JSONStream.parse('features.*', convert);
-		const outFile = fs.createWriteStream(`${partialsDir}/${i}.json`);
-
 		const options = {
 			url: url,
 			method: 'GET',
 			json: true,
 		};
 
-		// timeout for throttle
-		setTimeout(() => {
-			var r = request(options);
-			if (!supportsGeoJSON) {
-				r = r.pipe(featureStream)
-					.pipe(geojsonStream.stringify());
-			}
-			r.pipe(outFile)
-				.on('finish', () => {
-					completedRequests += 1;
-					console.log(`Completed ${completedRequests} of ${requests} requests for ${serviceName}`);
-					if(requests == completedRequests) {
-						mergeFiles();
-					}
-				})
-				.on('error', (err) => {
-					console.log(err);
-				});
-		}, i * throttle);
+		parts.push({
+			options: options,
+			path: `${partialsDir}/${i}.json`,
+		});
+	}
 
-		function convert (feature) {
-			if(!feature.geometry) {
-				console.log("Feature Missing Geometry and is Omitted: ", JSON.stringify(feature))
-				return null;
-			}
-			const gj = {
-				type: 'Feature',
-				properties: feature.attributes,
-				geometry: TerraformerArcGIS.parse(feature.geometry)
-			}
-			return gj
-		}
+	return Promise.mapSeries(
+		parts,
+		oneRequest)
+		.then(mergeFiles);
 
-		function mergeFiles() {
-			console.log(`Finished extracting chunks for ${serviceName}, merging files...`)
-			fs.readdir(partialsDir, (err, files) => {
-				const finalFilePath = `${outDir}/${serviceName}/${serviceNameShort}_${Date.now()}.geojson`
-				const finalFile = fs.createWriteStream(finalFilePath);
-
-				let streams = CombinedStream.create();
-				_.each(files, (file) => {
-					streams.append((next) => {
-						next(
-							fs.createReadStream(`${partialsDir}/${file}`)
-								.pipe(JSONStream.parse('features.*'))
-								.on('error', (err) => {
-									console.log(err);
-								})
-						);
-					})
-				});
-
-				streams
-					.pipe(geojsonStream.stringify())
-					.pipe(finalFile)
-					.on('finish', () => {
-						rimraf(partialsDir, () => {
-							console.log(`${serviceName} is complete`);
-							console.log(`File Location: ${finalFilePath}`);
-							if(program.shapefile) {
-								makeShape(finalFilePath);
-							}
-						});
-					})
-					.on('error', (err) => {
-						console.log(err);
-					})
+	function oneRequest(part, index) {
+		return Promise.delay(index ? throttle : 0, part.options)
+			.then(rp)
+			.then((resp) => {
+				if (resp.error) {
+					throw new Error(resp.error.message);
+				}
+				if (supportsGeoJSON) {
+					return resp.features;
+				} else {
+					return resp.features.flatMap(convert);
+				}
+			})
+			.then((features) => {
+				const out = geojsonStream.stringify()
+				const p = streamToPromise(out
+							  .pipe(fs.createWriteStream(part.path))
+							 );
+				features.forEach((feature) => out.write(feature));
+				out.end();
+				return p;
+			})
+			.then(() => {
+				completedRequests++;
+				console.log(`Completed ${completedRequests} of ${requests} requests for ${serviceName}`);
+				return part.path;
 			});
-		}
+	}
 
-		function makeShape(geojsonPath) {
-			console.log(`Generating shapefile for ${serviceName}`)
-			// todo: make optional with flag
-			const shpPath = `${outDir}/${serviceName}/${serviceNameShort}_${Date.now()}.zip`;
-			const shpFile = fs.createWriteStream(shpPath);
-			var shapefile = ogr2ogr(geojsonPath)
-				.format('ESRI Shapefile')
-				.options(['-nln', serviceName])
-				.timeout(120000)
-				.skipfailures()
-				.stream();
-			shapefile.pipe(shpFile);
+	function convert (feature) {
+		if(!feature.geometry) {
+			console.log("Feature Missing Geometry and is Omitted: ", JSON.stringify(feature))
+			return [];
 		}
+		const gj = {
+			type: 'Feature',
+			properties: feature.attributes,
+			geometry: TerraformerArcGIS.parse(feature.geometry)
+		}
+		return [gj];
+	}
+
+	function mergeFiles(files) {
+		console.log(`Finished extracting chunks for ${serviceName}, merging files...`)
+		const finalFilePath = `${outDir}/${serviceName}/${serviceNameShort}_${Date.now()}.geojson`
+		const finalFile = fs.createWriteStream(finalFilePath);
+
+		let streams = CombinedStream.create();
+		_.each(files, (file) => {
+			streams.append((next) => {
+				next(
+					fs.createReadStream(file)
+						.pipe(JSONStream.parse('features.*'))
+						.on('error', (err) => {
+							console.log(err);
+						})
+				);
+			})
+		});
+
+		return streamToPromise(
+			streams
+				.pipe(geojsonStream.stringify())
+				.pipe(finalFile)
+		).then(() => {
+			rimraf(partialsDir, () => {
+				console.log(`${serviceName} is complete`);
+				console.log(`File Location: ${finalFilePath}`);
+				if(program.shapefile) {
+					makeShape(finalFilePath);
+				}
+			});
+		});
+	}
+
+	function makeShape(geojsonPath) {
+		console.log(`Generating shapefile for ${serviceName}`)
+		// todo: make optional with flag
+		const shpPath = `${outDir}/${serviceName}/${serviceNameShort}_${Date.now()}.zip`;
+		const shpFile = fs.createWriteStream(shpPath);
+		var shapefile = ogr2ogr(geojsonPath)
+		    .format('ESRI Shapefile')
+		    .options(['-nln', serviceName])
+		    .timeout(120000)
+		    .skipfailures()
+		    .stream();
+		shapefile.pipe(shpFile);
+	}
+}
 
 	};
 }
