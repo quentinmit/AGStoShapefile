@@ -23,6 +23,7 @@ const queryString = require('query-string');
 const merge2 = require('merge2');
 const rimraf = require('rimraf');
 const ogr2ogr = require('ogr2ogr');
+const xmljs = require('xml-js');
 // ./mixin.js
 // merge user query params with default
 const mixin = require('./mixin');
@@ -94,6 +95,7 @@ function requestService(serviceUrl, serviceName, body, meta, throttle) {
 	if (body.error) {
 		return Promise.reject(body.error.message);
 	}
+
 	let objectIds = body.objectIds;
 	objectIds.sort();
 	const requests = Math.ceil(objectIds.length / 100);
@@ -120,6 +122,11 @@ function requestService(serviceUrl, serviceName, body, meta, throttle) {
 		rimraf.sync(partialsDir);
 		fs.mkdirSync(partialsDir);
 	}
+
+	const filePrefix = `${outDir}/${serviceName}/${serviceNameShort}_${Date.now()}`;
+
+	fs.writeFileSync(`${filePrefix}.xml`, xmljs.js2xml(convertMetadata(meta), {compact: true}));
+	fs.writeFileSync(`${filePrefix}.qml`, xmljs.js2xml(generateQML(meta), {compact: true}));
 
 	function allRequests(supportsGeoJSON) {
 		let parts = [];
@@ -173,8 +180,8 @@ function requestService(serviceUrl, serviceName, body, meta, throttle) {
 	}
 	let p = allRequests(supportsGeoJSON);
 	if (supportsGeoJSON) {
-		p.catch(e => {
-			console.log("Failed to fetch geoJSON; falling back to ESRI JSON", e);
+		p = p.catch(e => {
+			console.log("Failed to fetch geoJSON for "+serviceName+"; falling back to ESRI JSON", e);
 			return allRequests(false);
 		})
 	}
@@ -207,7 +214,7 @@ function requestService(serviceUrl, serviceName, body, meta, throttle) {
 				return part.path;
 			})
 			.catch(e => {
-				console.log("Failed request", part, e);
+				console.log("Failed request", part.url, e);
 				throw e;
 			});
 	}
@@ -227,7 +234,7 @@ function requestService(serviceUrl, serviceName, body, meta, throttle) {
 
 	function mergeFiles(files) {
 		console.log(`Finished extracting chunks for ${serviceName}, merging files...`)
-		const finalFilePath = `${outDir}/${serviceName}/${serviceNameShort}_${Date.now()}.geojson`
+		const finalFilePath = `${filePrefix}.geojson`
 		const finalFile = fs.createWriteStream(finalFilePath);
 
 		let streams = CombinedStream.create();
@@ -261,7 +268,7 @@ function requestService(serviceUrl, serviceName, body, meta, throttle) {
 	function makeShape(geojsonPath) {
 		console.log(`Generating shapefile for ${serviceName}`)
 		// todo: make optional with flag
-		const shpPath = `${outDir}/${serviceName}/${serviceNameShort}_${Date.now()}.zip`;
+		const shpPath = `${filePrefix}.zip`;
 		const shpFile = fs.createWriteStream(shpPath);
 		var shapefile = ogr2ogr(geojsonPath)
 		    .format('ESRI Shapefile')
@@ -273,7 +280,317 @@ function requestService(serviceUrl, serviceName, body, meta, throttle) {
 	}
 }
 
+function convertMetadata(meta) {
+	// Convert JSON-format metadata to FGDC XML metadata
+	let out = {
+		metadata: {
+			idinfo: {
+				citation: {
+					citeinfo: {
+						title: meta.name,
+						geoform: "vector digital data",
+					},
+				},
+				descript: {
+					abstract: meta.name,
+					supplinf: meta.description,
+				},
+			},
+			eainfo: {
+				detailed: {
+					enttyp: {
+						enttypl: meta.name,
+						enttypd: meta.description,
+					},
+					attr: [
+					],
+				},
+			},
+		},
 	};
+	out.metadata.eainfo.detailed.attr = meta.fields.map(function(field) {
+		let out = {
+			attrlabl: field.name,
+			attrdef: field.alias,
+		};
+		if (field.domain) {
+			if (field.domain.type == 'codedValue') {
+				out.attrdomv = {
+					edom: field.domain.codedValues.map(function(value) {
+						return {
+							edomv: value.code,
+							edomvd: value.name,
+						};
+					}),
+				};
+			}
+		}
+		return out;
+	});
+	return out;
+}
+
+function parseEsriLineStyle(style) {
+	return {
+		esriSLSSolid: 'solid',
+		esriSLSDash: 'dash',
+		esriSLSDashDot: 'dash dot',
+		esriSLSDashDotDot: 'dash dot dot',
+		esriSLSDot: 'dot',
+		esriSLSNull: 'no',
+	}[style] || 'solid';
+}
+
+function parseEsriMarkerShape(style) {
+	return {
+		esriSMSCircle: 'circle',
+		esriSMSCross: 'cross',
+		esriSMSDiamond: 'diamond',
+		esriSMSSquare: 'square',
+		esriSMSX: 'cross2',
+		esriSMSTriangle: 'triangle',
+	}[style] || 'circle';
+}
+
+function parseEsriFillStyle(style) {
+	return {
+		esriSFSBackwardDiagonal: 'b_diagonal',
+		esriSFSCross: 'cross',
+		esriSFSDiagonalCross: 'diagonal_x',
+		esriSFSForwardDiagonal: 'f_diagonal',
+		esriSFSHorizontal: 'horizontal',
+		esriSFSNull: 'no',
+		esriSFSSolid: 'solid',
+		esriSFSVertical: 'vertical',
+	}[style] || 'solid';
+}
+
+function parseEsriSymbol(symbol) {
+	if (symbol.type == "esriSMS") {
+		// marker
+		const out = {
+			'_attributes': {
+				type: 'marker',
+			},
+			'layer': {
+				'_attributes': {
+					'class': 'SimpleMarker',
+				},
+				'prop': [
+					{'_attributes': {k: 'color', v: symbol.color.join(',')}},
+					{'_attributes': {k: 'size', v: symbol.size}},
+					{'_attributes': {k: 'size_unit', v: 'Point'}},
+					{'_attributes': {k: 'angle', v: -symbol.angle}},
+					{'_attributes': {k: 'offset', v: [symbol.xoffset,symbol.yoffset].join(',')}},
+					{'_attributes': {k: 'offset_unit', v: 'Point'}},
+					{'_attributes': {k: 'name', v: parseEsriMarkerShape(symbol.style)}},
+				],
+			},
+		};
+		if (symbol.outline) {
+			out.layer.prop.push(
+				{'_attributes': {k: 'outline_color', v: symbol.outline.color.join(',')}},
+				{'_attributes': {k: 'outline_width', v: symbol.outline.width}},
+				{'_attributes': {k: 'outline_width_unit', v: 'Point'}},
+				{'_attributes': {k: 'outline_style', v: parseEsriLineStyle(symbol.outline.style)}},
+			);
+		}
+		return out;
+	} else if (symbol.type == "esriSLS") {
+		// line
+		return {
+			'_attributes': {
+				type: 'line',
+			},
+			'layer': {
+				'_attributes': {
+					'class': 'SimpleLine',
+				},
+				'prop': [
+					{'_attributes': {k: 'line_color', v: symbol.color.join(',')}},
+					{'_attributes': {k: 'line_width', v: symbol.width}},
+					{'_attributes': {k: 'line_width_unit', v: 'Point'}},
+					{'_attributes': {k: 'line_style', v: parseEsriLineStyle(symbol.style)}},
+				],
+			},
+		};
+	} else if (symbol.type == "esriSFS") {
+		// fill
+		const out = {
+			'_attributes': {
+				type: 'fill',
+			},
+			'layer': {
+				'_attributes': {
+					'class': 'SimpleFill',
+				},
+				'prop': [
+					{'_attributes': {k: 'color', v: symbol.color.join(',')}},
+					{'_attributes': {k: 'fill_style', v: parseEsriFillStyle(symbol.style)}},
+				],
+			},
+		};
+		if (symbol.outline) {
+			out.layer.prop.push(
+				{'_attributes': {k: 'outline_color', v: symbol.outline.color.join(',')}},
+				{'_attributes': {k: 'outline_width', v: symbol.outline.width}},
+				{'_attributes': {k: 'outline_width_unit', v: 'Point'}},
+				{'_attributes': {k: 'outline_style', v: parseEsriLineStyle(symbol.outline.style)}},
+			);
+		}
+		return out;
+	} else if (symbol.type == "esriPFS") {
+		// picture fill
+	} else if (symbol.type == "esriPMS") {
+		// picture marker
+		return {
+			'_attributes': {
+				type: 'marker',
+			},
+			'layer': {
+				'_attributes': {
+					'class': 'RasterMarker',
+				},
+				'prop': [
+					{'_attributes': {k: 'offset', v: [symbol.xoffset,symbol.yoffset].join(',')}},
+					{'_attributes': {k: 'offset_unit', v: 'Point'}},
+					{'_attributes': {k: 'size', v: symbol.width}},
+					{'_attributes': {k: 'size_unit', v: 'Point'}},
+					{'_attributes': {k: 'angle', v: -symbol.angle}},
+					{'_attributes': {k: 'imageFile', v: `base64:${symbol.imageData}`}},
+				],
+			},
+		};
+	} else if (symbol.type == "esriTS") {
+		// text
+	}
+}
+
+function generateQML(meta) {
+	// Convert JSON-format metadata to QGIS QML style file
+	let out = {
+		"_doctype": "qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'",
+		qgis: {
+			"_attributes": {
+				labelsEnabled: meta.hasLabels,
+				version: "3",
+			},
+			"renderer-v2": {
+				"_attributes": {
+				}
+			},
+			"fieldConfiguration": {},
+			"aliases": {},
+		}
+	};
+
+	if (meta.drawingInfo && meta.drawingInfo.renderer) {
+		const renderer = meta.drawingInfo.renderer;
+
+		if (renderer.type == "simple") {
+			out.qgis['renderer-v2'] = {
+				'_attributes': {
+					type: "singleSymbol",
+				},
+				symbols: {
+					symbol: _.merge(parseEsriSymbol(renderer.symbol), {'_attributes': {name: '0'}}),
+				},
+			};
+		} else if (renderer.type == "uniqueValue") {
+			let attr = renderer.field1;
+			if (renderer.field3) {
+				attr = `concat("${renderer.field1}",',',"${renderer.field2}",',',"${renderer.field3}")`;
+			} else if (renderer.field2) {
+				attr = `concat("${renderer.field1}",',',"${renderer.field2}")`;
+			}
+			let symbols = [];
+			let categories = [];
+			_.forEach(renderer.uniqueValueInfos, category => {
+				const symbol = parseEsriSymbol(category.symbol);
+				if (symbol) {
+					const name = `${symbols.length}`;
+					symbol['_attributes'].name = name;
+					categories.push({
+						'_attributes': {
+							value: category.value,
+							label: category.label,
+							symbol: name,
+						},
+					});
+					symbols.push(symbol);
+				};
+			});
+			out.qgis['renderer-v2'] = {
+				'_attributes': {
+					type: "categorizedSymbol",
+					attr: attr,
+				},
+				symbols: {
+					symbol: symbols,
+				},
+				categories: {
+					category: categories,
+				},
+			};
+		}
+	}
+
+	out.qgis.fieldConfiguration.field = meta.fields.map(function(field) {
+		let out = {
+			'_attributes': {
+				name: field.name,
+			}
+		};
+		if (field.domain) {
+			if (field.domain.type == 'codedValue') {
+				out.editWidget = {
+					'_attributes': {
+						type: 'ValueMap',
+					},
+					config: {
+						Option: {
+							'_attributes': {
+								'type': 'Map',
+							},
+							Option: {
+								'_attributes': {
+									'name': 'map',
+									'type': 'List',
+								},
+								Option: field.domain.codedValues.map(function(value) {
+									return {
+										'_attributes': {
+											'type': 'Map',
+										},
+										Option: {
+											'_attributes': {
+												value: value.code,
+												name: value.name,
+												type: typeof(value.code) == Number ? 'double': 'QString',
+											},
+										},
+									};
+								}),
+							},
+						},
+					},
+				};
+			}
+		}
+		return out;
+	});
+
+	out.qgis.aliases.alias = _.map(meta.fields, (field, index) => {
+		return {
+			'_attributes': {
+				'field': field.name,
+				'name': field.alias,
+				'index': index,
+			},
+		};
+	});
+
+	return out;
 }
 
 
