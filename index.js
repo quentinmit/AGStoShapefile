@@ -30,22 +30,22 @@ var program = require('commander');
 
 program
 	.version('1.0.2')
-	.option('-o, --outdir [directory]', 'Output directory')
-	.option('-s, --services [path to txt file]', 'Text file containing service list to extract')
+	.option('-o, --outdir [directory]', 'Output directory', './output/')
+	.option('-s, --services [path to txt file]', 'Text file containing service list to extract', 'services.txt')
+	.option('-P, --parallelism [concurrency]', 'Number of services to download in parallel', value => parseInt(value), Infinity)
 	.option('-S, --shapefile', 'Optional export to shapefile')
 	.parse(process.argv);
 
-const serviceFile = program.services || 'services.txt';
 var outDir = program.outdir || './output/';
 // Remove trailing '/'
 outDir = outDir.replace(/\/$/, '');
 
-fs.readFile(serviceFile, function (err, data) {
+fs.readFile(program.services, function (err, data) {
 	if (err) {
 		throw err;
 	}
 
-	data.toString().split('\n').forEach(function (service) {
+	Promise.map(data.toString().split('\n'), (service) => {
 		var service = service.split('|');
 		if(service[0].split('').length == 0) return;
 		const serviceUrl = service[0].trim();
@@ -55,8 +55,8 @@ fs.readFile(serviceFile, function (err, data) {
 			throttle = +service[2];
 		}
 
-		fetchOneService(serviceUrl, serviceName, throttle);
-	})
+		return fetchOneService(serviceUrl, serviceName, throttle);
+	}, {concurrency: program.parallelism})
 });
 
 function fetchOneService(serviceUrl, serviceName, throttle) {
@@ -72,7 +72,7 @@ function fetchOneService(serviceUrl, serviceName, throttle) {
 	qs = queryString.stringify(qs);
 	var url = decodeURIComponent(getBaseUrl(baseUrl) + '/query/?' + qs);
 
-	Promise.join(
+	return Promise.join(
 		rp({
 			url : url,
 			method : 'GET',
@@ -83,17 +83,20 @@ function fetchOneService(serviceUrl, serviceName, throttle) {
 			method: 'GET',
 			json: true,
 		}),
-		(body, meta) => requestService(serviceUrl, serviceName, body.objectIds, meta, throttle))
+		(body, meta) => requestService(serviceUrl, serviceName, body, meta, throttle))
 		.catch((err) => {
-			console.log(err);
+			console.log("Failed to fetch service", serviceUrl, err);
 		});
 }
 
 // Resquest JSON from AGS
-function requestService(serviceUrl, serviceName, objectIds, meta, throttle) {
+function requestService(serviceUrl, serviceName, body, meta, throttle) {
+	if (body.error) {
+		return Promise.reject(body.error.message);
+	}
+	let objectIds = body.objectIds;
 	objectIds.sort();
 	const requests = Math.ceil(objectIds.length / 100);
-	var completedRequests = 0;
 	console.log(`Number of features for service ${serviceName}:`, objectIds.length);
 	console.log(`Getting chunks of 100 features, will make ${requests} total requests`);
 
@@ -118,7 +121,7 @@ function requestService(serviceUrl, serviceName, objectIds, meta, throttle) {
 		fs.mkdirSync(partialsDir);
 	}
 
-	return Promise.any((supportsGeoJSON ? [true,false] : [false]).map(supportsGeoJSON => {
+	function allRequests(supportsGeoJSON) {
 		let parts = [];
 
 		for(let i = 0; i < Math.ceil(objectIds.length / 100); i++) {
@@ -167,8 +170,15 @@ function requestService(serviceUrl, serviceName, objectIds, meta, throttle) {
 		return Promise.mapSeries(
 			parts,
 			oneRequest);
-	}))
-		.then(mergeFiles);
+	}
+	let p = allRequests(supportsGeoJSON);
+	if (supportsGeoJSON) {
+		p.catch(e => {
+			console.log("Failed to fetch geoJSON; falling back to ESRI JSON", e);
+			return allRequests(false);
+		})
+	}
+	return p.then(mergeFiles);
 
 	function oneRequest(part, index) {
 		return Promise.delay(index ? throttle : 0, part.options)
@@ -193,8 +203,7 @@ function requestService(serviceUrl, serviceName, objectIds, meta, throttle) {
 				return p;
 			})
 			.then(() => {
-				completedRequests++;
-				console.log(`Completed ${completedRequests} of ${requests} requests for ${serviceName}`);
+				console.log(`Completed ${index+1} of ${requests} requests for ${serviceName}`);
 				return part.path;
 			})
 			.catch(e => {
