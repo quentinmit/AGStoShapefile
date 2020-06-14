@@ -118,53 +118,56 @@ function requestService(serviceUrl, serviceName, objectIds, meta, throttle) {
 		fs.mkdirSync(partialsDir);
 	}
 
-	var parts = [];
+	return Promise.any((supportsGeoJSON ? [true,false] : [false]).map(supportsGeoJSON => {
+		let parts = [];
 
-	for(let i = 0; i < Math.ceil(objectIds.length / 100); i++) {
-		var ids = [];
-		if ( ((i + 1) * 100) < objectIds.length ) {
-			ids = objectIds.slice(i * 100, (i * 100) + 100);
-		} else {
-			ids = objectIds.slice(i * 100, objectIds[objectIds.length]);
+		for(let i = 0; i < Math.ceil(objectIds.length / 100); i++) {
+			var ids = [];
+			if ( ((i + 1) * 100) < objectIds.length ) {
+				ids = objectIds.slice(i * 100, (i * 100) + 100);
+			} else {
+				ids = objectIds.slice(i * 100, objectIds[objectIds.length]);
+			}
+
+			// we need these query params
+			const reqQS = {
+				objectIds : ids.join(','),
+				geometryType : 'esriGeometryEnvelope',
+				returnGeometry : true,
+				returnIdsOnly : false,
+				outFields : '*',
+				outSR : '4326',
+				f : 'json'
+			};
+			// user provided query params
+			const userQS = getUrlVars(serviceUrl);
+			// mix one obj with another
+			var qs = mixin(userQS, reqQS);
+
+			if (supportsGeoJSON) {
+				qs.f = 'geoJSON';
+			}
+
+			qs = queryString.stringify(qs);
+			const url = decodeURIComponent(getBaseUrl(serviceUrl) + '/query/?' + qs);
+
+			const options = {
+				url: url,
+				method: 'GET',
+				json: true,
+			};
+
+			parts.push({
+				options: options,
+				path: `${partialsDir}/${i}.json`,
+				supportsGeoJSON: supportsGeoJSON,
+			});
 		}
 
-		// we need these query params
-		const reqQS = {
-			objectIds : ids.join(','),
-			geometryType : 'esriGeometryEnvelope',
-			returnGeometry : true,
-			returnIdsOnly : false,
-			outFields : '*',
-			outSR : '4326',
-			f : 'json'
-		};
-		// user provided query params
-		const userQS = getUrlVars(serviceUrl);
-		// mix one obj with another
-		var qs = mixin(userQS, reqQS);
-
-		if (supportsGeoJSON) {
-			qs.f = 'geoJSON';
-		}
-
-		qs = queryString.stringify(qs);
-		const url = decodeURIComponent(getBaseUrl(serviceUrl) + '/query/?' + qs);
-
-		const options = {
-			url: url,
-			method: 'GET',
-			json: true,
-		};
-
-		parts.push({
-			options: options,
-			path: `${partialsDir}/${i}.json`,
-		});
-	}
-
-	return Promise.mapSeries(
-		parts,
-		oneRequest)
+		return Promise.mapSeries(
+			parts,
+			oneRequest);
+	}))
 		.then(mergeFiles);
 
 	function oneRequest(part, index) {
@@ -174,10 +177,10 @@ function requestService(serviceUrl, serviceName, objectIds, meta, throttle) {
 				if (resp.error) {
 					throw new Error(resp.error.message);
 				}
-				if (supportsGeoJSON) {
+				if (part.supportsGeoJSON) {
 					return resp.features;
 				} else {
-					return resp.features.flatMap(convert);
+					return _.flatMap(resp.features, convert);
 				}
 			})
 			.then((features) => {
@@ -193,6 +196,10 @@ function requestService(serviceUrl, serviceName, objectIds, meta, throttle) {
 				completedRequests++;
 				console.log(`Completed ${completedRequests} of ${requests} requests for ${serviceName}`);
 				return part.path;
+			})
+			.catch(e => {
+				console.log("Failed request", part, e);
+				throw e;
 			});
 	}
 
