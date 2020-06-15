@@ -33,7 +33,9 @@ program
 	.version('1.0.2')
 	.option('-o, --outdir [directory]', 'Output directory', './output/')
 	.option('-s, --services [path to txt file]', 'Text file containing service list to extract', 'services.txt')
+	.option('--server [url]', 'Server to fetch all layers from')
 	.option('-P, --parallelism [concurrency]', 'Number of services to download in parallel', value => parseInt(value), Infinity)
+	.option('-t, --throttle [milliseconds', 'Delay between requests for the same layer', value => parseInt(value), 0)
 	.option('-S, --shapefile', 'Optional export to shapefile')
 	.parse(process.argv);
 
@@ -41,24 +43,51 @@ var outDir = program.outdir || './output/';
 // Remove trailing '/'
 outDir = outDir.replace(/\/$/, '');
 
-fs.readFile(program.services, function (err, data) {
-	if (err) {
-		throw err;
-	}
-
-	Promise.map(data.toString().split('\n'), (service) => {
-		var service = service.split('|');
-		if(service[0].split('').length == 0) return;
-		const serviceUrl = service[0].trim();
-		const serviceName = service[1].trim();
-		var throttle = 0;
-		if(service.length > 2) {
-			throttle = +service[2];
+if (program.server) {
+	let layers = listLayers(program.server);
+	Promise.map(layers, layer => {
+		return fetchOneService(layer.url, layer.name, layer.throttle);
+	});
+} else {
+	fs.readFile(program.services, function (err, data) {
+		if (err) {
+			throw err;
 		}
 
-		return fetchOneService(serviceUrl, serviceName, throttle);
-	}, {concurrency: program.parallelism})
-});
+		Promise.map(data.toString().split('\n'), (service) => {
+			var service = service.split('|');
+			if(service[0].split('').length == 0) return;
+			const serviceUrl = service[0].trim();
+			const serviceName = service[1].trim();
+			let throttle = program.throttle;
+			if(service.length > 2) {
+				throttle = +service[2];
+			}
+
+			return fetchOneService(serviceUrl, serviceName, throttle);
+		}, {concurrency: program.parallelism})
+	});
+}
+
+function listLayers(serverUrl) {
+	var baseUrl = getBaseUrl(serverUrl);
+	return rp({
+		url: baseUrl + '?f=json',
+		method: 'GET',
+		json: true,
+	})
+		.then(meta => {
+			const layers = _.mapKeys(meta.layers, 'id');
+
+			return _.map(meta.layers, layer => {
+				let name = layer.name;
+				for (parent = layer.parentLayerId; parent >= 0; parent = layers[parent].parentLayerId) {
+					name = layers[parent].name + '/' + name;
+				}
+				return {url: baseUrl+'/'+layer.id, name: name, throttle: program.throttle};
+			});
+		});
+}
 
 function fetchOneService(serviceUrl, serviceName, throttle) {
 	var baseUrl = getBaseUrl(serviceUrl);
@@ -108,13 +137,7 @@ function requestService(serviceUrl, serviceName, body, meta, throttle) {
 
 	const partialsDir = `${outDir}/${serviceName}/partials`;
 
-	if(!fs.existsSync(`${outDir}`)) {
-		fs.mkdirSync(`${outDir}`)
-	}
-
-	if(!fs.existsSync(`${outDir}/${serviceName}`)) {
-		fs.mkdirSync(`${outDir}/${serviceName}`);
-	}
+	fs.mkdirSync(`${outDir}/${serviceName}`, {recursive: true});
 
 	if (!fs.existsSync(partialsDir)){
 		fs.mkdirSync(partialsDir);
