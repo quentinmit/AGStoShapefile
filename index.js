@@ -466,6 +466,45 @@ function parseEsriSymbol(symbol) {
 	}
 }
 
+function toQGISOption(data) {
+	if (typeof data === 'string') {
+		return {
+			'_attributes': {
+				type: 'QString',
+				value: data,
+			},
+		};
+	} else if (typeof data === 'boolean') {
+		return {
+			'_attributes': {
+				type: 'bool',
+				value: data ? 'true' : 'false',
+			},
+		};
+	} else if (typeof data === 'number') {
+		return {
+			'_attributes': {
+				type: 'int',
+				value: data,
+			},
+		};
+	} else if (Array.isArray(data)) {
+		return {
+			'_attributes': {
+				type: 'List',
+			},
+			Option: _.map(data, toQGISOption),
+		};
+	} else if (typeof data === 'object') {
+		return {
+			'_attributes': {
+				type: 'Map',
+			},
+			Option: _.map(data, (value, key) => _.merge(toQGISOption(value), {'_attributes': {'name': key}})),
+		};
+	};
+}
+
 function generateQML(meta) {
 	// Convert JSON-format metadata to QGIS QML style file
 	let out = {
@@ -534,6 +573,80 @@ function generateQML(meta) {
 			};
 		}
 	}
+	if (meta.type == "Annotation Layer") {
+		out.qgis['_attributes'].labelsEnabled = '1';
+		out.qgis['renderer-v2'] = {
+			'_attributes': {
+				type: 'nullSymbol',
+			},
+		};
+		out.qgis.labeling = {
+			'_attributes': {
+				type: 'simple',
+			},
+			settings: {
+				'text-style': {
+					'_attributes': {
+						fieldName: "regexp_replace(TextString, '&lt;[^>]+>','')",
+						isExpression: '1',
+					},
+				},
+				placement: {
+					'_attributes': {
+						placement: '1',
+					},
+				},
+				dd_properties: {
+					'Option': toQGISOption({
+						name: '',
+						properties: {
+							Bold: {
+								active: true,
+								field: 'Bold',
+								type: 2,
+							},
+							Italic: {
+								active: true,
+								field: 'Italic',
+								type: 2,
+							},
+							Underline: {
+								active: true,
+								field: 'Underline',
+								type: 2,
+							},
+							Color: {
+								active: true,
+								expression: "color_rgb(to_real(coalesce(regexp_substr( TextString, 'red=''([^'']+)'''),0)&#x9;||'.0'),to_real(coalesce(regexp_substr( TextString, 'green=''([^'']+)'''),0)||'.0'),to_real(coalesce(regexp_substr( TextString, 'blue=''([^'']+)'''),0)||'.0'))",
+								type: 3,
+							},
+							Family: {
+								active: true,
+								field: 'FontName',
+								type: 2,
+							},
+							LabelRotation: {
+								active: true,
+								expression: '-"Angle"',
+								type: 3,
+							},
+							OffsetXY: {
+								active: true,
+								expression: 'array(XOffset,YOffset)',
+								type: 3,
+							},
+							Size: {
+								active: true,
+								field: 'FontSize',
+								type: 2,
+							},
+						},
+						type: 'collection',
+					}),
+				},
+			},
+		};
+	}
 
 	out.qgis.fieldConfiguration.field = meta.fields.map(function(field) {
 		let out = {
@@ -548,31 +661,14 @@ function generateQML(meta) {
 						type: 'ValueMap',
 					},
 					config: {
-						Option: {
-							'_attributes': {
-								'type': 'Map',
-							},
-							Option: {
-								'_attributes': {
-									'name': 'map',
-									'type': 'List',
-								},
-								Option: field.domain.codedValues.map(function(value) {
-									return {
-										'_attributes': {
-											'type': 'Map',
-										},
-										Option: {
-											'_attributes': {
-												value: value.code,
-												name: value.name,
-												type: typeof(value.code) == Number ? 'double': 'QString',
-											},
-										},
-									};
+						Option: toQGISOption({
+							map: field.domain.codedValues.map(
+								value => {
+									let ret = {};
+									ret[value.name] = value.code;
+									return ret
 								}),
-							},
-						},
+						}),
 					},
 				};
 			}
